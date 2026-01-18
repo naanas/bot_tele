@@ -174,25 +174,33 @@ def send_welcome(message):
 def admin_menu(message):
     chat_id = str(message.chat.id)
     with app.app_context():
-        # Cek apakah user ini terdaftar di database User dan masa aktif berlaku
+        # 1. Cek apakah ini Super Admin (Hardcoded)
+        is_hardcoded_admin = (chat_id == str(ADMIN_ID))
+        
         user = User.query.filter_by(telegram_id=chat_id).first()
         
-        # Validasi akses: Harus User terdaftar ATAU Super Admin (Hardcoded ID)
-        if (user and user.active_until > datetime.now()) or str(message.chat.id) == str(ADMIN_ID):
-             # Jika Super Admin belum punya user DB, kita anggap dia pakai config default/owner (skip logic kompleks)
-             # Idealnya Super Admin juga login DB. Kita cari promo config-nya.
-             
-             target_promo = None
-             if user:
-                 target_promo = user.promo
-             else:
-                 # Fallback for hardcoded admin ID if not in DB yet (pake owner pertama)
-                 owner = User.query.filter_by(role='owner').first()
-                 if owner: target_promo = owner.promo
+        # Auto-Link Owner ID if valid Admin but not linked
+        if is_hardcoded_admin:
+            owner_db = User.query.filter_by(role='owner').first()
+            if owner_db:
+                if owner_db.telegram_id != chat_id:
+                    owner_db.telegram_id = chat_id
+                    db.session.commit()
+                user = owner_db # Set user context to owner
+                
+                # Ensure Promo Config Exists
+                if not user.promo:
+                    db.session.add(PromoConfig(user_id=user.id))
+                    db.session.commit()
 
+        # 2. Validasi Akses
+        if user and user.active_until and user.active_until > datetime.now():
+             target_promo = user.promo
+             
              if target_promo:
                 status_icon = "🟢 ON" if target_promo.is_active else "🔴 OFF"
                 markup = types.InlineKeyboardMarkup(row_width=2)
+                
                 # Main Controls
                 markup.add(types.InlineKeyboardButton(f"🚀 Mulai ({status_icon})", callback_data='toggle_promo'))
                 markup.add(types.InlineKeyboardButton("📩 Set Pesan", callback_data='set_promo_msg'), 
@@ -205,18 +213,19 @@ def admin_menu(message):
                      markup.add(types.InlineKeyboardButton("⚙️ Pilih Group", callback_data='select_groups'))
 
                 info_text = f"🤖 **BROADCAST PANEL**\nStatus: {status_icon}\nTarget: {filter_label}\n"
-                info_text += f"👤 **Client: {user.username if user else 'Super Admin'}**\n"
-                if user: info_text += f"📅 Expired: {user.active_until.strftime('%Y-%m-%d')}\n"
+                info_text += f"👤 **Client: {user.username}**\n"
+                info_text += f"📅 Expired: {user.active_until.strftime('%Y-%m-%d')}\n"
                 
                 # Tambahan Menu Owner
-                if str(message.chat.id) == str(ADMIN_ID) or (user and user.role == 'owner'):
+                if user.role == 'owner':
                     markup.add(types.InlineKeyboardButton("👥 Manage Users (SaaS)", callback_data='manage_users'))
 
                 bot.reply_to(message, info_text, reply_markup=markup, parse_mode="Markdown")
              else:
-                 bot.reply_to(message, "⚠️ Akun tidak aktif.")
+                 bot.reply_to(message, "⚠️ Akun aktif tapi konfigurasi error. (Hubungi Dev)")
         else:
-             bot.reply_to(message, "❌ Akses Ditolak.")
+             # Akses Ditolak
+             bot.reply_to(message, f"❌ **Akses Ditolak**\n\nID Kamu: `{chat_id}`\nAdmin ID Terdaftar: `{ADMIN_ID}`\n\nJika kamu Owner, pastikan `ADMIN_ID` di `app.py` sudah benar.", parse_mode="Markdown")
 
 # ... (get_current_promo_from_context, add_user_bot, cek_id... stay same) ...
 # We need to insert the NEW handle_query logic (Target Management) BEFORE existing 'manage_users'
