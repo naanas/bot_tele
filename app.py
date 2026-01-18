@@ -278,7 +278,7 @@ def dashboard():
     if user.role == 'owner':
         all_users = User.query.all()
         
-    return render_template('dashboard.html', user=user, config=config, products=products, all_users=all_users, targets_count=PromoTarget.query.count())
+    return render_template('dashboard.html', user=user, config=config, products=products, all_users=all_users, targets_count=PromoTarget.query.count(), now=datetime.now())
 
 # Routes Management User (Owner Only)
 @app.route('/user/add', methods=['POST'])
