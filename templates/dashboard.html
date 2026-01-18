@@ -157,6 +157,39 @@
             <a href="/logout" class="logout">Logout</a>
         </header>
 
+        <!-- Promotion Manager -->
+        <div class="section" style="border-left: 4px solid var(--success);">
+            <h2>🚀 Promotion Manager</h2>
+            <div class="grid">
+                <div>
+                    <h3 style="margin-top:0">Status:
+                        {% if promo.is_active %} <span style="color: var(--success);">RUNNING 🟢</span>
+                        {% else %} <span style="color: var(--danger);">STOPPED 🔴</span> {% endif %}
+                    </h3>
+                    <p style="color: var(--text-muted);">Broadcasting to <b>{{ targets_count }}</b> targets every {{
+                        promo.delay }}s.</p>
+                </div>
+                <form method="POST" action="/update_promo">
+                    <label>Broadcast Message ({name} = user name)</label>
+                    <textarea name="message">{{ promo.message }}</textarea>
+
+                    <div style="display: flex; gap: 10px; align-items: center; margin-top: 10px;">
+                        <div>
+                            <label>Delay (seconds)</label>
+                            <input type="number" name="delay" value="{{ promo.delay }}" style="width: 100px;">
+                        </div>
+                        <div style="flex:1; display: flex; align-items: center; gap: 10px; padding-top: 20px;">
+                            <label style="cursor: pointer;">
+                                <input type="checkbox" name="is_active" {% if promo.is_active %}checked{% endif %}>
+                                Activate Auto-Broadcast
+                            </label>
+                            <button type="submit">Update & Save</button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+
         <!-- Configuration Section -->
         <div class="section">
             <h2>⚙️ General Configuration</h2>
@@ -173,14 +206,12 @@
                 </div>
                 <div class="grid">
                     <div>
-                        <label>WhatsApp Number (e.g., 628...)</label>
-                        <input type="text" name="wa_number" value="{{ config.wa_number }}">
-                    </div>
-                    <div>
-                        <label>WhatsApp Template Message</label>
-                        <input type="text" name="wa_template" value="{{ config.wa_template }}">
+                        <label>Admin Telegram Username (without @)</label>
+                        <input type="text" name="admin_telegram_username" value="{{ config.admin_telegram_username }}"
+                            placeholder="contoh: annas_putra">
                     </div>
                 </div>
+                <!-- WA section removed -->
                 <button type="submit">Save Configuration</button>
             </form>
         </div>
