@@ -4,11 +4,12 @@ from flask import Flask, request, render_template, redirect, url_for, session, f
 from flask_sqlalchemy import SQLAlchemy
 import os
 import time
+from datetime import datetime, timedelta
 from threading import Thread
 
 # --- KONFIGURASI ---
 TOKEN = os.environ.get('BOT_TOKEN')
-ADMIN_ID = 5845570657
+ADMIN_ID = 5845570657 # ID Super Admin (Owner)
 SERVER_URL = "https://bot-tele-u3f8.onrender.com"
 
 # --- FLASK & DB SETUP ---
@@ -21,6 +22,18 @@ db = SQLAlchemy(app)
 bot = telebot.TeleBot(TOKEN)
 
 # --- DATABASE MODELS ---
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(50), unique=True, nullable=False)
+    password = db.Column(db.String(50), nullable=False)
+    telegram_id = db.Column(db.String(50), nullable=True) # Untuk akses bot
+    role = db.Column(db.String(10), default='user') # 'owner' or 'user'
+    active_until = db.Column(db.DateTime, nullable=True) # Masa aktif
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    
+    # Relasi ke PromoConfig
+    promo = db.relationship('PromoConfig', backref='user', uselist=False, cascade="all, delete-orphan")
+
 class BotConfig(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     welcome_message = db.Column(db.Text, default="Halo! Selamat datang di Toko Digital Pro.")
@@ -35,10 +48,12 @@ class Product(db.Model):
 
 class PromoConfig(db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     is_active = db.Column(db.Boolean, default=False)
-    message = db.Column(db.Text, default="Halo! Jangan lupa cek katalog kami ya!")
-    delay = db.Column(db.Integer, default=60) # Detik
+    message = db.Column(db.Text, default="Halo! Cek promo kami.")
+    delay = db.Column(db.Integer, default=60)
     last_run = db.Column(db.Float, default=0.0)
+    targets_filter = db.Column(db.String(20), default="all") # 'all', 'group', 'private'
 
 class PromoTarget(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -46,6 +61,7 @@ class PromoTarget(db.Model):
     type = db.Column(db.String(20)) # 'private' atau 'group'
     name = db.Column(db.String(100))
 
+# --- HELPERS ---
 def get_config():
     config = BotConfig.query.first()
     if not config:
@@ -54,56 +70,68 @@ def get_config():
         db.session.commit()
     return config
 
-def get_promo_config():
-    config = PromoConfig.query.first()
-    if not config:
-        config = PromoConfig()
-        db.session.add(config)
+def init_owner():
+    # Pastikan ada user Owner default
+    owner = User.query.filter_by(role='owner').first()
+    if not owner:
+        owner = User(username='admin', password='admin123', role='owner', active_until=datetime.now() + timedelta(days=3650))
+        db.session.add(owner)
         db.session.commit()
-    return config
+        # Create promo config for owner
+        db.session.add(PromoConfig(user_id=owner.id))
+        db.session.commit()
 
-# --- BACKGROUND PROMO LOOP ---
+# --- BACKGROUND PROMO LOOP (MULTI-USER) ---
 def run_promo_loop():
     while True:
         try:
             with app.app_context():
-                promo = get_promo_config()
-                if promo.is_active and (time.time() - promo.last_run) > promo.delay:
-                    targets = PromoTarget.query.all()
-                    count = 0
-                    for target in targets:
-                        try:
-                            formatted_msg = promo.message.replace("{name}", target.name or "Kak")
-                            bot.send_message(target.chat_id, formatted_msg)
-                            count += 1
-                        except Exception as e:
-                            print(f"Gagal kirim ke {target.chat_id}: {e}")
-                            # Hapus jika user block bot
-                            if "forbidden" in str(e).lower():
-                                db.session.delete(target)
-                    
-                    if count > 0:
-                        promo.last_run = time.time()
-                        db.session.commit()
-                        print(f"Broadcast sukses ke {count} target.")
+                # Ambil semua user yang aktif dan masa aktif belum habis
+                active_users = User.query.filter(User.active_until > datetime.now()).all()
+                
+                for user in active_users:
+                    if user.promo and user.promo.is_active:
+                        promo = user.promo
+                        if (time.time() - promo.last_run) > promo.delay:
+                            # Filter targets
+                            query = PromoTarget.query
+                            if promo.targets_filter == 'group':
+                                query = query.filter_by(type='group')
+                            elif promo.targets_filter == 'private':
+                                query = query.filter_by(type='private')
+                            targets = query.all()
+                            
+                            count = 0
+                            # Simple logic: Kirim ke semua (Blasting)
+                            # Untuk sistem lebih canggih harusnya ada queue per user agar tidak spamming server
+                            for target in targets:
+                                try:
+                                    formatted_msg = promo.message.replace("{name}", target.name or "Kak")
+                                    # Tambahin watermark pengirim biar tau ini promo dari siapa (opsional)
+                                    bot.send_message(target.chat_id, formatted_msg)
+                                    count += 1
+                                    time.sleep(0.1) # Small delay to prevent flood limit per msg
+                                except Exception as e:
+                                    if "forbidden" in str(e).lower():
+                                        db.session.delete(target)
+                            
+                            if count > 0:
+                                promo.last_run = time.time()
+                                db.session.commit()
+                                print(f"User {user.username}: Broadcast sent to {count} targets.")
+            
         except Exception as e:
             print(f"Error Promo Loop: {e}")
         
-        time.sleep(10) # Cek setiap 10 detik
+        time.sleep(5) # Cek setiap 5 detik
 
 # --- LOGIKA BOT ---
-
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    # Simpan User ke Database Target
     with app.app_context():
+        # Save Target
         if not PromoTarget.query.filter_by(chat_id=str(message.chat.id)).first():
-            new_target = PromoTarget(
-                chat_id=str(message.chat.id),
-                type=message.chat.type,
-                name=message.from_user.first_name
-            )
-            db.session.add(new_target)
+            db.session.add(PromoTarget(chat_id=str(message.chat.id), type=message.chat.type, name=message.from_user.first_name))
             db.session.commit()
 
         config = get_config()
@@ -114,127 +142,194 @@ def send_welcome(message):
         btn_admin = types.InlineKeyboardButton("📞 Chat Admin", url=tele_url)
         markup.add(btn_katalog, btn_bayar, btn_admin)
         
-        bot.send_message(
-            message.chat.id, 
-            f"Halo {message.from_user.first_name}!\n\n{config.welcome_message}",
-            reply_markup=markup,
-            parse_mode="Markdown"
-        )
+        bot.send_message(message.chat.id, f"Halo {message.from_user.first_name}!\n\n{config.welcome_message}", reply_markup=markup, parse_mode="Markdown")
 
-# --- VENOM STYLE MENU ---
 @bot.message_handler(commands=['admin', 'menu'])
 def admin_menu(message):
-    if message.chat.id == ADMIN_ID:
-        with app.app_context():
-            promo = get_promo_config()
-            status_icon = "🟢 ON" if promo.is_active else "🔴 OFF"
-            
-            markup = types.InlineKeyboardMarkup(row_width=2)
-            btn_start = types.InlineKeyboardButton(f"🚀 Mulai Promosi ({status_icon})", callback_data='toggle_promo')
-            btn_msg = types.InlineKeyboardButton("📩 Set Pesan", callback_data='set_promo_msg')
-            btn_delay = types.InlineKeyboardButton(f"⏱ Atur Jeda ({promo.delay}s)", callback_data='set_promo_delay')
-            btn_list = types.InlineKeyboardButton("📂 List Target", callback_data='list_targets')
-            markup.add(btn_start)
-            markup.add(btn_msg, btn_delay, btn_list)
-            
-            bot.reply_to(message, "🤖 **PANEL PROMOSI**\n\nSilakan atur broadcast otomatis disini.", reply_markup=markup, parse_mode="Markdown")
-    else:
-        bot.reply_to(message, "❌ Akses Ditolak.")
+    chat_id = str(message.chat.id)
+    with app.app_context():
+        # Cek apakah user ini terdaftar di database User dan masa aktif berlaku
+        user = User.query.filter_by(telegram_id=chat_id).first()
+        
+        # Validasi akses: Harus User terdaftar ATAU Super Admin (Hardcoded ID)
+        if (user and user.active_until > datetime.now()) or str(message.chat.id) == str(ADMIN_ID):
+             # Jika Super Admin belum punya user DB, kita anggap dia pakai config default/owner (skip logic kompleks)
+             # Idealnya Super Admin juga login DB. Kita cari promo config-nya.
+             
+             target_promo = None
+             if user:
+                 target_promo = user.promo
+             else:
+                 # Fallback for hardcoded admin ID if not in DB yet (pake owner pertama)
+                 owner = User.query.filter_by(role='owner').first()
+                 if owner: target_promo = owner.promo
+
+             if target_promo:
+                status_icon = "🟢 ON" if target_promo.is_active else "🔴 OFF"
+                markup = types.InlineKeyboardMarkup(row_width=2)
+                markup.add(types.InlineKeyboardButton(f"🚀 Mulai ({status_icon})", callback_data='toggle_promo'))
+                markup.add(types.InlineKeyboardButton("📩 Set Pesan", callback_data='set_promo_msg'), 
+                           types.InlineKeyboardButton(f"⏱ Jeda ({target_promo.delay}s)", callback_data='set_promo_delay'))
+                
+                info_text = f"👤 **User Panel: {user.username if user else 'Super Admin'}**\n"
+                if user: info_text += f"📅 Expired: {user.active_until.strftime('%Y-%m-%d')}\n"
+                
+                bot.reply_to(message, info_text + "\nAtur promosi kamu disini.", reply_markup=markup, parse_mode="Markdown")
+             else:
+                 bot.reply_to(message, "⚠️ Akun kamu tidak memiliki konfigurasi promo. Hubungi Owner.")
+        else:
+             bot.reply_to(message, "❌ Akses Ditolak atau Masa Aktif Habis.")
+
+def get_current_promo_from_context(chat_id):
+    # Helper to find which promo config to update based on chat_id
+    user = User.query.filter_by(telegram_id=str(chat_id)).first()
+    if user: return user.promo
+    # Fallback owner
+    if str(chat_id) == str(ADMIN_ID):
+        owner = User.query.filter_by(role='owner').first()
+        return owner.promo
+    return None
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
     with app.app_context():
         config = get_config()
-        promo = get_promo_config()
         
-        if call.data == 'toggle_promo':
-            promo.is_active = not promo.is_active
-            db.session.commit()
-            status = "DIAKTIFKAN 🟢" if promo.is_active else "DIMATIKAN 🔴"
-            bot.answer_callback_query(call.id, f"Promosi {status}")
-            
-            # Refresh Menu
-            status_icon = "🟢 ON" if promo.is_active else "🔴 OFF"
-            markup = types.InlineKeyboardMarkup(row_width=2)
-            btn_start = types.InlineKeyboardButton(f"🚀 Mulai Promosi ({status_icon})", callback_data='toggle_promo')
-            btn_msg = types.InlineKeyboardButton("📩 Set Pesan", callback_data='set_promo_msg')
-            btn_delay = types.InlineKeyboardButton(f"⏱ Atur Jeda ({promo.delay}s)", callback_data='set_promo_delay')
-            btn_list = types.InlineKeyboardButton("📂 List Target", callback_data='list_targets')
-            markup.add(btn_start)
-            markup.add(btn_msg, btn_delay, btn_list)
-            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
+        if call.data in ['toggle_promo', 'set_promo_msg', 'set_promo_delay']:
+            promo = get_current_promo_from_context(call.message.chat.id)
+            if not promo:
+                bot.answer_callback_query(call.id, "Akses ditolak.")
+                return
 
-        elif call.data == 'set_promo_msg':
-            msg = bot.send_message(call.message.chat.id, "Silakan kirim pesan promosi baru (Text/Caption):")
-            bot.register_next_step_handler(msg, save_promo_msg)
+            if call.data == 'toggle_promo':
+                promo.is_active = not promo.is_active
+                db.session.commit()
+                status = "DIAKTIFKAN" if promo.is_active else "DIMATIKAN"
+                bot.answer_callback_query(call.id, f"Promo {status}")
+                # Update UI (Re-send menu logic simplified)
+                bot.send_message(call.message.chat.id, f"✅ Promosi berhasil {status}")
 
-        elif call.data == 'set_promo_delay':
-            msg = bot.send_message(call.message.chat.id, "Masukkan durasi jeda dalam detik (contoh: 60):")
-            bot.register_next_step_handler(msg, save_promo_delay)
-            
-        elif call.data == 'list_targets':
-            count = PromoTarget.query.count()
-            bot.send_message(call.message.chat.id, f"📊 **Total Target:** {count} User/Grup")
+            elif call.data == 'set_promo_msg':
+                msg = bot.send_message(call.message.chat.id, "Kirim pesan promosi baru:")
+                bot.register_next_step_handler(msg, save_promo_msg_bot)
 
-        # --- MENU USER ---
+            elif call.data == 'set_promo_delay':
+                msg = bot.send_message(call.message.chat.id, "Masukkan durasi jeda (detik):")
+                bot.register_next_step_handler(msg, save_promo_delay_bot)
+
+        # Menu Public
         elif call.data == 'menu_katalog':
             products = Product.query.all()
             markup = types.InlineKeyboardMarkup()
-            msg_text = "📜 **KATALOG PRODUK**\n\n"
-            if not products:
-                msg_text += "_Belum ada produk._"
-            else:
-                for p in products:
-                    msg_text += f"🔹 **{p.name}**\n   Harga: {p.price}\n   Ket: {p.description}\n\n"
-            btn_beli = types.InlineKeyboardButton("🛒 Pesan Sekarang", url=f"https://t.me/{config.admin_telegram_username}")
-            markup.add(btn_beli)
-            bot.send_message(call.message.chat.id, msg_text, reply_markup=markup, parse_mode="Markdown")
-
+            msg_text = "📜 **KATALOG**\n\n" + ("\n".join([f"🔹 {p.name} - {p.price}" for p in products]) if products else "Kosong")
+            markup.add(types.InlineKeyboardButton("Admin", url=f"https://t.me/{config.admin_telegram_username}"))
+            bot.send_message(call.message.chat.id, msg_text, reply_markup=markup)
+        
         elif call.data == 'menu_bayar':
-            bot.send_message(call.message.chat.id, f"🏦 **METODE PEMBAYARAN**\n\n{config.payment_info}")
+            bot.send_message(call.message.chat.id, config.payment_info)
 
-def save_promo_msg(message):
+def save_promo_msg_bot(message):
     with app.app_context():
-        promo = get_promo_config()
-        promo.message = message.text
-        db.session.commit()
-        bot.reply_to(message, "✅ Pesan promosi disimpan!")
-
-def save_promo_delay(message):
-    try:
-        delay = int(message.text)
-        with app.app_context():
-            promo = get_promo_config()
-            promo.delay = delay
+        promo = get_current_promo_from_context(message.chat.id)
+        if promo:
+            promo.message = message.text
             db.session.commit()
-            bot.reply_to(message, f"✅ Jeda diatur ke {delay} detik.")
-    except:
-        bot.reply_to(message, "❌ Harap masukkan angka.")
+            bot.reply_to(message, "✅ Pesan tersimpan.")
+
+def save_promo_delay_bot(message):
+    try:
+        val = int(message.text)
+        with app.app_context():
+            promo = get_current_promo_from_context(message.chat.id)
+            if promo:
+                promo.delay = val
+                db.session.commit()
+                bot.reply_to(message, "✅ Jeda tersimpan.")
+    except: pass
 
 # --- FLASK ROUTES (CMS) ---
-
 @app.route('/admin/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        if request.form.get('password') == os.environ.get('ADMIN_PASSWORD', 'admin123'):
-            session['logged_in'] = True
-            return redirect(url_for('dashboard'))
-        return render_template('login.html', error="Wrong Password!")
+        username = request.form.get('username')
+        password = request.form.get('password')
+        user = User.query.filter_by(username=username).first()
+        
+        if user and user.password == password:
+            if user.active_until > datetime.now():
+                session['user_id'] = user.id
+                session['role'] = user.role
+                return redirect(url_for('dashboard'))
+            else:
+                return render_template('login.html', error="Masa aktif akun habis!")
+        return render_template('login.html', error="Login Gagal")
     return render_template('login.html')
 
 @app.route('/dashboard')
 def dashboard():
-    if not session.get('logged_in'):
-        return redirect(url_for('login'))
+    if 'user_id' not in session: return redirect(url_for('login'))
+    
+    user = User.query.get(session['user_id'])
     config = get_config()
-    promo = get_promo_config()
     products = Product.query.all()
-    targets_count = PromoTarget.query.count()
-    return render_template('dashboard.html', config=config, products=products, promo=promo, targets_count=targets_count)
+    
+    # Data for Owner
+    all_users = []
+    if user.role == 'owner':
+        all_users = User.query.all()
+        
+    return render_template('dashboard.html', user=user, config=config, products=products, all_users=all_users, targets_count=PromoTarget.query.count())
 
+# Routes Management User (Owner Only)
+@app.route('/user/add', methods=['POST'])
+def add_user():
+    if session.get('role') != 'owner': return "Access Denied"
+    
+    username = request.form.get('username')
+    password = request.form.get('password')
+    tele_id = request.form.get('telegram_id')
+    days = int(request.form.get('days', 30))
+    
+    new_user = User(
+        username=username, 
+        password=password, 
+        telegram_id=tele_id, 
+        active_until=datetime.now() + timedelta(days=days)
+    )
+    db.session.add(new_user)
+    db.session.commit()
+    # Create Promo Config for new user
+    db.session.add(PromoConfig(user_id=new_user.id))
+    db.session.commit()
+    
+    return redirect(url_for('dashboard'))
+
+@app.route('/user/delete/<int:id>')
+def delete_user(id):
+    if session.get('role') != 'owner': return "Access Denied"
+    u = User.query.get(id)
+    if u and u.role != 'owner':
+        db.session.delete(u)
+        db.session.commit()
+    return redirect(url_for('dashboard'))
+
+@app.route('/update_promo', methods=['POST'])
+def update_promo():
+    if 'user_id' not in session: return redirect(url_for('login'))
+    user = User.query.get(session['user_id'])
+    
+    user.promo.message = request.form.get('message')
+    user.promo.delay = int(request.form.get('delay'))
+    user.promo.is_active = 'is_active' in request.form
+    user.promo.targets_filter = request.form.get('targets_filter', 'all')
+    db.session.commit()
+    return redirect(url_for('dashboard'))
+
+# ... (Product & Config routes similar as before, check role if needed) ...
+# For brevity, keeping basic Update Config routes:
 @app.route('/update_config', methods=['POST'])
 def update_config():
-    if not session.get('logged_in'): return redirect(url_for('login'))
+    if session.get('role') != 'owner': return "Access Denied" # Only owner changes global config
     config = get_config()
     config.welcome_message = request.form.get('welcome_message')
     config.payment_info = request.form.get('payment_info')
@@ -242,35 +337,24 @@ def update_config():
     db.session.commit()
     return redirect(url_for('dashboard'))
 
-@app.route('/update_promo', methods=['POST'])
-def update_promo():
-    if not session.get('logged_in'): return redirect(url_for('login'))
-    promo = get_promo_config()
-    promo.message = request.form.get('message')
-    promo.delay = int(request.form.get('delay'))
-    promo.is_active = 'is_active' in request.form
-    db.session.commit()
-    return redirect(url_for('dashboard'))
-
 @app.route('/add_product', methods=['POST'])
 def add_product():
-    if not session.get('logged_in'): return redirect(url_for('login'))
+    if session.get('role') != 'owner': return "Access Denied"
     db.session.add(Product(name=request.form.get('name'), price=request.form.get('price'), description=request.form.get('description')))
     db.session.commit()
     return redirect(url_for('dashboard'))
 
 @app.route('/delete_product/<int:id>', methods=['POST'])
 def delete_product(id):
-    if not session.get('logged_in'): return redirect(url_for('login'))
+    if session.get('role') != 'owner': return "Access Denied"
     product = Product.query.get(id)
-    if product:
-        db.session.delete(product)
-        db.session.commit()
+    db.session.delete(product)
+    db.session.commit()
     return redirect(url_for('dashboard'))
 
 @app.route('/logout')
 def logout():
-    session.pop('logged_in', None)
+    session.clear()
     return redirect(url_for('login'))
 
 @app.route('/' + TOKEN, methods=['POST'])
@@ -282,22 +366,19 @@ def getMessage():
 
 @app.route("/")
 def index():
-    bot.remove_webhook()
-    bot.set_webhook(url=SERVER_URL + "/" + TOKEN)
     return redirect(url_for('login'))
 
 with app.app_context():
     db.create_all()
+    init_owner() # Create default admin if not exists
 
 if __name__ == "__main__":
-    # Jalankan Loop Promosi di Background Thread
     t_promo = Thread(target=run_promo_loop)
     t_promo.daemon = True
     t_promo.start()
-
+    
     if os.environ.get('PORT'):
         app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
     else:
-        print("Bot berjalan di mode Local...")
         bot.remove_webhook()
         bot.infinity_polling()
