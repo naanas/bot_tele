@@ -34,9 +34,7 @@ class User(db.Model):
     active_until = db.Column(db.DateTime)
     promo = db.relationship('PromoConfig', backref='user', uselist=False, cascade="all, delete-orphan")
 
-class PromoxConfig(db.Model):
-# Rename table to avoid conflict if old table exists, or rely on clean schema
-    __tablename__ = 'promo_config' 
+class PromoConfig(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     is_active = db.Column(db.Boolean, default=False)
@@ -54,9 +52,6 @@ class PromoxConfig(db.Model):
     permit_text = db.Column(db.Text, default="PM Protected.")
     timer_mode = db.Column(db.String(10), default='none')
     timer_data = db.Column(db.Text)
-
-# Alias for code cleaness
-PromoConfig = PromoxConfig
 
 # --- USERBOT MANAGER (ASYNC) ---
 clients = {} # {user_id: Client}
