@@ -249,6 +249,11 @@ def index():
 def admin_login():
     return "Dashboard Not Yet Implemented for Userbot Mode. Use Telegram Commands."
 
+# Silence old webhook errors
+@app.route('/<path:path>', methods=['GET', 'POST', 'HEAD'])
+def catch_all(path):
+    return "OK"
+
 if __name__ == "__main__":
     # Start Userbot Loop in Background
     t = threading.Thread(target=run_async_loop)
