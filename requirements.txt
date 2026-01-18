@@ -1,4 +1,5 @@
-pyTelegramBotAPI
+pyrogram
+tgcrypto
 flask
 gunicorn
 Flask-SQLAlchemy
