@@ -1,38 +1,30 @@
 import telebot
-import os
-import time
-from flask import Flask
-from threading import Thread
 from telebot import types
+from flask import Flask, request
+import os
 
 # --- KONFIGURASI ---
-# Token diambil dari Environment Variable di Render
 TOKEN = os.environ.get('BOT_TOKEN')
-# ID Telegram kamu untuk menerima laporan order
-ADMIN_ID = 5845570657 
+ADMIN_ID = 5845570657
+# Ganti dengan URL Render kamu (tambahkan https://)
+# Contoh: https://bot-tele-u3f8.onrender.com
+SERVER_URL = "https://bot-tele-u3f8.onrender.com"
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
-
-# --- WEB SERVER (Agar Render tidak mati/Error) ---
-@app.route('/')
-def home():
-    return "Bot Toko Online is Running!"
-
-def run_flask():
-    # Render mewajibkan aplikasi berjalan di port yang mereka tentukan
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
 
 # --- LOGIKA BOT ---
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    # Membuat tombol menu utama
     markup = types.InlineKeyboardMarkup(row_width=2)
     btn_katalog = types.InlineKeyboardButton("🛍️ Katalog Produk", callback_data='menu_katalog')
     btn_bayar = types.InlineKeyboardButton("💳 Cara Bayar", callback_data='menu_bayar')
-    btn_admin = types.InlineKeyboardButton("📞 Chat Admin (WA)", url="https://wa.me/6282131077460") # Ganti nomor WA kamu
+    
+    # Update WA Link dengan pesan otomatis
+    wa_msg = "Halo Admin, saya mau pesan Jasa Bot Telegram."
+    wa_url = f"https://wa.me/6282131077460?text={wa_msg.replace(' ', '%20')}"
+    btn_admin = types.InlineKeyboardButton("📞 Chat Admin (WA)", url=wa_url)
     
     markup.add(btn_katalog, btn_bayar, btn_admin)
     
@@ -46,7 +38,6 @@ def send_welcome(message):
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
     if call.data == 'menu_katalog':
-        # Menampilkan katalog dengan tombol beli
         markup = types.InlineKeyboardMarkup()
         btn_beli = types.InlineKeyboardButton("🛒 Pesan Bot Telegram Sekarang", callback_data='order_bot')
         markup.add(btn_beli)
@@ -65,32 +56,47 @@ def handle_query(call):
         )
 
     elif call.data == 'order_bot':
-        # NOTIFIKASI KE ADMIN
         user_info = f"Nama: {call.from_user.first_name}\nID: {call.from_user.id}\nUsername: @{call.from_user.username}"
         bot.send_message(ADMIN_ID, f"🔔 **PESANAN BARU MASUK!**\n\nProduk: Jasa Bot Telegram\nPelanggan: \n{user_info}")
         
-        # KONFIRMASI KE USER
         bot.answer_callback_query(call.id, "Pesanan dikirim ke Admin!")
         bot.send_message(call.message.chat.id, "✅ **Pesanan Berhasil!**\nAdmin telah menerima notifikasi pesananmu dan akan segera menghubungimu.")
 
 @bot.message_handler(commands=['admin'])
 def check_admin(message):
     if message.chat.id == ADMIN_ID:
-        bot.reply_to(message, "✅ **Akses Admin Diterima!**\nBos, semua sistem berjalan normal di Render.")
+        webhook_info = bot.get_webhook_info()
+        status = "Webhook Aktif" if webhook_info.url else "Polling Mode"
+        bot.reply_to(message, f"✅ **Akses Admin Diterima!**\nStatus: {status}\nServer: Running")
     else:
         bot.reply_to(message, "❌ Akses Ditolak. Menu ini hanya untuk owner.")
 
+# --- WEBHOOK ROUTE ---
+# Telegram akan mengirim update ke sini
+@app.route('/' + TOKEN, methods=['POST'])
+def getMessage():
+    json_string = request.get_data().decode('utf-8')
+    update = telebot.types.Update.de_json(json_string)
+    bot.process_new_updates([update])
+    return "!", 200
+
+@app.route("/")
+def webhook():
+    bot.remove_webhook()
+    bot.set_webhook(url=SERVER_URL + "/" + TOKEN)
+    return "Bot dengan Webhook Siap!", 200
+
 # --- EKSEKUSI ---
 if __name__ == "__main__":
-    # Jalankan Flask di thread berbeda agar tidak mengganggu polling bot
-    t = Thread(target=run_flask)
-    t.daemon = True
-    t.start()
+    # Jika dijalankan di Render (ada PORT env), pakai Webhook
+    # Jika dijalankan local, pakai Polling biasa untuk testing
     
-    print("Bot sedang online di Render...")
-    while True:
-        try:
-            bot.infinity_polling(timeout=20, long_polling_timeout=10)
-        except Exception as e:
-            print(f"Error Koneksi: {e}")
-            time.sleep(5)
+    if os.environ.get('PORT'):
+        port = int(os.environ.get('PORT', 5000))
+        # Webhook diset saat route '/' diakses pertama kali oleh Render health check atau kita panggil manual
+        # Tapi lebih aman kita set langsung saat start jika memungkinkan, atau biarkan route '/' yang handle
+        app.run(host="0.0.0.0", port=port)
+    else:
+        print("Bot berjalan di mode Local (Polling)...")
+        bot.remove_webhook()
+        bot.infinity_polling()
