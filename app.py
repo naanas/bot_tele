@@ -4,6 +4,9 @@ import json
 from flask import Flask, request, render_template, redirect, url_for, session, flash
 from flask_sqlalchemy import SQLAlchemy
 import os
+from dotenv import load_dotenv
+load_dotenv() # Load local .env if exists
+
 import time
 from datetime import datetime, timedelta
 from threading import Thread
@@ -16,7 +19,7 @@ SERVER_URL = "https://bot-tele-u3f8.onrender.com"
 # --- FLASK & DB SETUP ---
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'rahasia123')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///bot_content.db')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///bot_content.db').replace("postgres://", "postgresql://")
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
@@ -56,6 +59,7 @@ class PromoConfig(db.Model):
     last_run = db.Column(db.Float, default=0.0)
     targets_filter = db.Column(db.String(20), default="all") # 'all', 'group', 'private', 'specific'
     specific_groups = db.Column(db.Text, default="[]") # JSON list of chat_ids
+    batch_offset = db.Column(db.Integer, default=0) # Round Robin Paging
 
 class PromoTarget(db.Model):
 
@@ -84,8 +88,9 @@ def init_owner():
         db.session.add(PromoConfig(user_id=owner.id))
         db.session.commit()
 
-# --- BACKGROUND PROMO LOOP (MULTI-USER) ---
+# --- BACKGROUND PROMO LOOP (SMART BATCHING | ROUND ROBIN) ---
 def run_promo_loop():
+    BATCH_SIZE = 20
     while True:
         try:
             with app.app_context():
@@ -95,47 +100,56 @@ def run_promo_loop():
                 for user in active_users:
                     if user.promo and user.promo.is_active:
                         promo = user.promo
+                        
+                        # Cek Delay (Time-based regulation)
                         if (time.time() - promo.last_run) > promo.delay:
                             targets = []
-                            # Fetch targets based on filter
-                            if promo.targets_filter == 'all':
-                                targets = PromoTarget.query.all()
-                            elif promo.targets_filter == 'group':
-                                targets = PromoTarget.query.filter_by(type='group').all()
+                            query = PromoTarget.query
+                            
+                            # Apply Filters
+                            if promo.targets_filter == 'group':
+                                query = query.filter_by(type='group')
                             elif promo.targets_filter == 'private':
-                                targets = PromoTarget.query.filter_by(type='private').all()
+                                query = query.filter_by(type='private')
                             elif promo.targets_filter == 'specific':
-                                # Parse specific groups
                                 try:
                                     selected_ids = json.loads(promo.specific_groups)
-                                    # Convert to strings for comparison
                                     selected_ids = [str(i) for i in selected_ids]
-                                    targets = PromoTarget.query.filter(PromoTarget.chat_id.in_(selected_ids)).all()
-                                except: targets = [] # Fallback if json error
+                                    query = query.filter(PromoTarget.chat_id.in_(selected_ids))
+                                except: pass # If error, default to empty query or handle safely
                             
+                            # Smart Paging (Offset & Limit)
+                            # Get batch of targets based on saved offset
+                            targets = query.offset(promo.batch_offset).limit(BATCH_SIZE).all()
+                            
+                            if not targets:
+                                # Jika tidak ada target (sudah habis), reset ke 0 untuk loop berikutnya
+                                promo.batch_offset = 0
+                                db.session.commit()
+                                continue
+
                             count = 0
-                            # Simple logic: Kirim ke semua (Blasting)
-                            # Untuk sistem lebih canggih harusnya ada queue per user agar tidak spamming server
                             for target in targets:
                                 try:
                                     formatted_msg = promo.message.replace("{name}", target.name or "Kak")
-                                    # Tambahin watermark pengirim biar tau ini promo dari siapa (opsional)
                                     bot.send_message(target.chat_id, formatted_msg)
                                     count += 1
-                                    time.sleep(0.1) # Small delay to prevent flood limit per msg
+                                    time.sleep(0.05) # Fast local sleep, relying on global delay
                                 except Exception as e:
                                     if "forbidden" in str(e).lower():
                                         db.session.delete(target)
                             
                             if count > 0:
+                                # Update Offset & Timestamp
+                                promo.batch_offset += count
                                 promo.last_run = time.time()
                                 db.session.commit()
-                                print(f"User {user.username}: Broadcast sent to {count} targets.")
+                                print(f"User {user.username}: Sent Batch {count} msgs. (Offset: {promo.batch_offset})")
             
         except Exception as e:
             print(f"Error Promo Loop: {e}")
         
-        time.sleep(5) # Cek setiap 5 detik
+        time.sleep(5) # Global Loop Delay
 
 # --- LOGIKA BOT ---
 @bot.message_handler(commands=['start'])
