@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bot CMS Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --primary: #3b82f6;
+            --danger: #ef4444;
+            --success: #22c55e;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            font-family: 'Inter', sans-serif;
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            border-bottom: 1px solid #334155;
+            padding-bottom: 20px;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.8rem;
+            background: linear-gradient(to right, #3b82f6, #8b5cf6);
+            -webkit-background-clip: text;
+            color: transparent;
+        }
+
+        .logout {
+            color: var(--danger);
+            text-decoration: none;
+            font-weight: 600;
+        }
+
+        .section {
+            background: var(--card-bg);
+            padding: 25px;
+            border-radius: 12px;
+            margin-bottom: 25px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+
+        h2 {
+            margin-top: 0;
+            font-size: 1.2rem;
+            color: var(--text);
+            border-left: 4px solid var(--primary);
+            padding-left: 10px;
+        }
+
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        label {
+            font-weight: 600;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        input,
+        textarea {
+            background: #0f172a;
+            border: 1px solid #334155;
+            color: white;
+            padding: 12px;
+            border-radius: 8px;
+            font-family: inherit;
+        }
+
+        textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+
+        button {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: 0.2s;
+            align-self: flex-start;
+        }
+
+        button:hover {
+            filter: brightness(110%);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+
+        th,
+        td {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 1px solid #334155;
+        }
+
+        th {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        .btn-delete {
+            background: var(--danger);
+            padding: 6px 12px;
+            font-size: 0.8rem;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 Bot Control Panel</h1>
+            <a href="/logout" class="logout">Logout</a>
+        </header>
+
+        <!-- Configuration Section -->
+        <div class="section">
+            <h2>⚙️ General Configuration</h2>
+            <form method="POST" action="/update_config">
+                <div class="grid">
+                    <div>
+                        <label>Welcome Message</label>
+                        <textarea name="welcome_message">{{ config.welcome_message }}</textarea>
+                    </div>
+                    <div>
+                        <label>Payment Info (displayed in /pay)</label>
+                        <textarea name="payment_info">{{ config.payment_info }}</textarea>
+                    </div>
+                </div>
+                <div class="grid">
+                    <div>
+                        <label>WhatsApp Number (e.g., 628...)</label>
+                        <input type="text" name="wa_number" value="{{ config.wa_number }}">
+                    </div>
+                    <div>
+                        <label>WhatsApp Template Message</label>
+                        <input type="text" name="wa_template" value="{{ config.wa_template }}">
+                    </div>
+                </div>
+                <button type="submit">Save Configuration</button>
+            </form>
+        </div>
+
+        <!-- Product Management -->
+        <div class="section">
+            <h2>🛍️ Product Catalog</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Price</th>
+                        <th>Description</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for product in products %}
+                    <tr>
+                        <td>{{ product.name }}</td>
+                        <td>{{ product.price }}</td>
+                        <td>{{ product.description }}</td>
+                        <td>
+                            <form action="/delete_product/{{ product.id }}" method="POST" style="display:inline;">
+                                <button type="submit" class="btn-delete">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            <h3 style="margin-top: 20px; color: var(--text-muted);">Add New Product</h3>
+            <form method="POST" action="/add_product" style="flex-direction: row; gap: 10px; flex-wrap: wrap;">
+                <input type="text" name="name" placeholder="Product Name" required style="flex: 1;">
+                <input type="text" name="price" placeholder="Price (e.g. Rp50k)" required style="width: 120px;">
+                <input type="text" name="description" placeholder="Short Description" required style="flex: 2;">
+                <button type="submit" style="background: var(--success);">Add</button>
+            </form>
+        </div>
+    </div>
+</body>
+
+</html>
