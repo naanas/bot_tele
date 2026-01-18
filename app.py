@@ -174,6 +174,10 @@ def admin_menu(message):
                 info_text = f"👤 **User Panel: {user.username if user else 'Super Admin'}**\n"
                 if user: info_text += f"📅 Expired: {user.active_until.strftime('%Y-%m-%d')}\n"
                 
+                # Tambahan Menu Owner
+                if str(message.chat.id) == str(ADMIN_ID) or (user and user.role == 'owner'):
+                    markup.add(types.InlineKeyboardButton("👥 Manage Users (SaaS)", callback_data='manage_users'))
+
                 bot.reply_to(message, info_text + "\nAtur promosi kamu disini.", reply_markup=markup, parse_mode="Markdown")
              else:
                  bot.reply_to(message, "⚠️ Akun kamu tidak memiliki konfigurasi promo. Hubungi Owner.")
@@ -190,11 +194,109 @@ def get_current_promo_from_context(chat_id):
         return owner.promo
     return None
 
+# --- ADMIN COMMANDS (OWNER ONLY) ---
+@bot.message_handler(commands=['add_user'])
+def add_user_bot(message):
+    # Format: /add_user Name TelegramID Days
+    # Cek Auth Owner
+    is_owner = str(message.chat.id) == str(ADMIN_ID)
+    if not is_owner:
+        with app.app_context():
+            u = User.query.filter_by(telegram_id=str(message.chat.id)).first()
+            if u and u.role == 'owner': is_owner = True
+    
+    if not is_owner: return bot.reply_to(message, "❌ Access Denied.")
+
+    try:
+        args = message.text.split()
+        if len(args) < 4:
+            return bot.reply_to(message, "⚠️ Format salah.\n`/add_user <NamaKlien> <TelegramID> <Hari>`\nContoh: `/add_user BosBaju 123456789 30`\n\nTips: Minta user ketik /id untuk tau ID mereka.", parse_mode="Markdown")
+        
+        username = args[1] # Disini berfungsi sebagai Nama Klien (Label)
+        tele_id = args[2]
+        days = int(args[3])
+        
+        with app.app_context():
+            # Cek duplicate ID or Username
+            if User.query.filter((User.username == username) | (User.telegram_id == tele_id)).first():
+                return bot.reply_to(message, "❌ Nama atau ID sudah terdaftar.")
+            
+            new_user = User(
+                username=username, 
+                password="client_no_login", # Dummy password
+                telegram_id=tele_id,
+                role='user',
+                active_until=datetime.now() + timedelta(days=days)
+            )
+            db.session.add(new_user)
+            db.session.commit()
+            
+            # Auto-create Promo Config
+            db.session.add(PromoConfig(user_id=new_user.id))
+            db.session.commit()
+            
+            bot.reply_to(message, f"✅ Client **{username}** ditambahkan!\n🆔 ID: `{tele_id}`\n📅 Aktif: {days} hari.\n\nMereka sekarang bisa akses menu `/admin`", parse_mode="Markdown")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Error: {e}")
+
+@bot.message_handler(commands=['id', 'cekid'])
+def cek_id(message):
+    bot.reply_to(message, f"🆔 ID Kamu: `{message.chat.id}`", parse_mode="Markdown")
+
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
     with app.app_context():
         config = get_config()
         
+        # --- SAAS MANAGEMENT ---
+        if call.data == 'manage_users':
+            # Cek Auth Owner
+            is_owner = str(call.message.chat.id) == str(ADMIN_ID)
+            if not is_owner:
+                u = User.query.filter_by(telegram_id=str(call.message.chat.id)).first()
+                if u and u.role == 'owner': is_owner = True
+            
+            if not is_owner:
+                return bot.answer_callback_query(call.id, "Access Denied")
+
+            users = User.query.filter(User.role != 'owner').all()
+            msg = "👥 **DAFTAR KLIEN BROADCAST**\n\n"
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            
+            if not users:
+                msg += "_Belum ada klien._\n"
+            else:
+                for u in users:
+                    status = "🟢" if u.active_until > datetime.now() else "🔴"
+                    msg += f"{status} **{u.username}** (Exp: {u.active_until.strftime('%d-%m-%Y')})\n"
+                    # Add delete button per user
+                    markup.add(types.InlineKeyboardButton(f"🗑️ Hapus {u.username}", callback_data=f"del_u_{u.id}"))
+            
+            msg += "\n➕ **Tambah Klien:**\n`/add_user <Nama> <ID> <Hari>`"
+            
+            # Back button
+            markup.add(types.InlineKeyboardButton("🔙 Kembali", callback_data='back_to_menu'))
+            bot.send_message(call.message.chat.id, msg, reply_markup=markup, parse_mode="Markdown")
+            return
+
+        elif call.data.startswith('del_u_'):
+            user_id = int(call.data.split('_')[2])
+            u = User.query.get(user_id)
+            if u:
+                name = u.username
+                db.session.delete(u)
+                db.session.commit()
+                bot.answer_callback_query(call.id, f"Client {name} dihapus.")
+                bot.send_message(call.message.chat.id, f"✅ Client **{name}** telah dihapus.", parse_mode="Markdown")
+            else:
+                bot.answer_callback_query(call.id, "User tidak ditemukan.")
+            return
+
+        elif call.data == 'back_to_menu':
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+            return
+
+        # --- PROMO LOGIC ---
         if call.data in ['toggle_promo', 'set_promo_msg', 'set_promo_delay']:
             promo = get_current_promo_from_context(call.message.chat.id)
             if not promo:
@@ -206,7 +308,6 @@ def handle_query(call):
                 db.session.commit()
                 status = "DIAKTIFKAN" if promo.is_active else "DIMATIKAN"
                 bot.answer_callback_query(call.id, f"Promo {status}")
-                # Update UI (Re-send menu logic simplified)
                 bot.send_message(call.message.chat.id, f"✅ Promosi berhasil {status}")
 
             elif call.data == 'set_promo_msg':
@@ -255,14 +356,12 @@ def login():
         password = request.form.get('password')
         user = User.query.filter_by(username=username).first()
         
-        if user and user.password == password:
-            if user.active_until > datetime.now():
-                session['user_id'] = user.id
-                session['role'] = user.role
-                return redirect(url_for('dashboard'))
-            else:
-                return render_template('login.html', error="Masa aktif akun habis!")
-        return render_template('login.html', error="Login Gagal")
+        # STRICT OWNER ONLY
+        if user and user.password == password and user.role == 'owner':
+            session['user_id'] = user.id
+            session['role'] = user.role
+            return redirect(url_for('dashboard'))
+        return render_template('login.html', error="Login Gagal / Hanya Owner yang bisa akses CMS!")
     return render_template('login.html')
 
 @app.route('/dashboard')
@@ -285,15 +384,20 @@ def dashboard():
 def add_user():
     if session.get('role') != 'owner': return "Access Denied"
     
-    username = request.form.get('username')
-    password = request.form.get('password')
+    username = request.form.get('username') # Name Label
     tele_id = request.form.get('telegram_id')
     days = int(request.form.get('days', 30))
     
+    # Cek Duplicate
+    if User.query.filter((User.username == username) | (User.telegram_id == tele_id)).first():
+         flash('Username/ID sudah ada!') # Flash need secret key
+         return redirect(url_for('dashboard'))
+         
     new_user = User(
         username=username, 
-        password=password, 
+        password="client_no_login", # Dummy
         telegram_id=tele_id, 
+        role='user',
         active_until=datetime.now() + timedelta(days=days)
     )
     db.session.add(new_user)
